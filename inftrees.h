@@ -16,21 +16,32 @@
    distance, an end-of-block, or an invalid code.  For a table
    pointer, the low four bits of op is the number of index bits of
    that table.  For a length or distance, the low four bits of op
-   is the number of extra bits to get after the code.  bits is
-   the number of bits in this code or part of the code to drop off
-   of the bit buffer.  val is the actual byte to output in the case
-   of a literal, the base length or distance, or the offset from
-   the current table to the next table.  Each entry is four bytes. */
+   is the number of bits in the code or part of the code, and bits
+   is that number plus the number of extra bits to get after the
+   code, so that the code and its extra bits can be dropped off of
+   the bit buffer together.  Otherwise bits is the number of bits in
+   this code or part of the code to drop off of the bit buffer.  val
+   is the actual byte to output in the case of a literal, the base
+   length or distance, or the offset from the current table to the
+   next table.  Each entry is four bytes.  bits comes first so that
+   it is the low byte of the entry on a little-endian machine. */
 typedef struct {
-    unsigned char op;           /* operation, extra bits, table bits */
-    unsigned char bits;         /* bits in this part of the code */
+    unsigned char bits;         /* bits to drop: code, plus any extra bits */
+    unsigned char op;           /* operation, code bits, table bits */
     unsigned short val;         /* offset in table or code value */
 } code;
+
+/* The number of bits in the code or part of the code of entry c, and the
+   number of extra bits that follow it. */
+#define CODE_BITS(c) \
+    ((c).op & 16 ? (unsigned)(c).op & 15 : (unsigned)(c).bits)
+#define CODE_EXTRA(c) \
+    ((c).op & 16 ? (unsigned)(c).bits - ((unsigned)(c).op & 15) : 0)
 
 /* op values as set by inflate_table():
     00000000 - literal
     0000tttt - table link, tttt != 0 is the number of table index bits
-    0001eeee - length or distance, eeee is the number of extra bits
+    0001cccc - length or distance, cccc is the number of bits in the code
     01100000 - end of block
     01000000 - invalid code
  */

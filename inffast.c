@@ -35,6 +35,21 @@ local Z_U8 load64(z_const unsigned char FAR *p) {
            ((Z_U8)p[6] << 48) | ((Z_U8)p[7] << 56);
 }
 
+/* Fill hold8 to at least 56 bits from the eight bytes at in. Bits above the
+   count in bits may already be there from an earlier refill; they are the same
+   bits, so adding them again changes nothing. */
+#define REFILL8() \
+    do { \
+        hold8 |= load64(in) << bits; \
+        in += (63 - bits) >> 3; \
+        bits |= 56; \
+    } while (0)
+
+/* The extra bits of entry e, from the bit buffer as it was before the code
+   and its extra bits were dropped: the low e.bits bits without the code. */
+#define EXTRA8(old, e) \
+    ((unsigned)(((old) & (((Z_U8)1 << (e).bits) - 1)) >> ((e).op & 15)))
+
 /* Copy len >= 1 bytes from dist bytes back in the output to out, and return
    out + len. It may write up to fifteen bytes after out + len, so the caller
    must have that room. */
@@ -146,6 +161,8 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     unsigned char FAR *from;    /* where to copy match from */
 #ifdef Z_U8
     Z_U8 hold8;                 /* 64-bit bit buffer of the fast loop */
+    Z_U8 old8;                  /* hold8 before the last code was dropped */
+    code here8;                 /* retrieved table entry, by value */
     z_const unsigned char FAR *last8;   /* two refills fit after in */
     unsigned char FAR *end8;    /* room for two literals, a match and 15 more */
 #endif
@@ -172,72 +189,66 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     dmask = (1U << state->distbits) - 1;
 
 #ifdef Z_U8
-    /* Fast loop, while sixteen bytes can be read at in (two refills of
-       eight bytes, the first advancing in by up to seven) and the output has
-       room for two literals and a match plus fifteen bytes: one iteration can
+    /* Fast loop, while sixteen bytes can be read at in (two refills of eight
+       bytes, the first advancing in by up to seven) and the output has room
+       for two literals and a match plus fifteen bytes: one iteration can
        write two literals and then a match, and copy_back() may write fifteen
-       bytes past the match. Each length/literal code starts with
-       at least 56 bits in hold8, enough for a length/distance pair (at most
-       48 bits). */
+       bytes past the match.
+
+       Each table lookup uses only bits that are already in hold8, and the
+       refill follows the lookup, so the refill does not delay the lookup.
+       The refill at the top leaves at least 56 bits. Two literals, a length
+       code and its extra bits take at most 40 of them, which leaves enough
+       for the first-level distance lookup. Before the distance code is
+       dropped there are at least 38: 15 for the code, 13 for its extra bits,
+       and 10 for the lookup at the top of the next iteration. */
     if (strm->avail_in >= 16 && strm->avail_out >= 2 + 258 + 15) {
         last8 = in + (strm->avail_in - 16);
         end8 = out + (strm->avail_out - (2 + 258 + 15));
         hold8 = hold;
+        REFILL8();
         do {
-            hold8 |= load64(in) << bits;
-            in += (63 - bits) >> 3;
-            bits |= 56;
-            here = lcode + (hold8 & lmask);
-            if (here->op == 0) {        /* up to three literals a refill */
-                hold8 >>= here->bits;
-                bits -= here->bits;
-                TRACE_LITERAL(here);
-                *out++ = (unsigned char)(here->val);
-                here = lcode + (hold8 & lmask);
-                if (here->op == 0) {
-                    hold8 >>= here->bits;
-                    bits -= here->bits;
-                    TRACE_LITERAL(here);
-                    *out++ = (unsigned char)(here->val);
-                    here = lcode + (hold8 & lmask);
-                    if (here->op == 0) {
-                        hold8 >>= here->bits;
-                        bits -= here->bits;
-                        TRACE_LITERAL(here);
-                        *out++ = (unsigned char)(here->val);
+            here8 = lcode[hold8 & lmask];
+            REFILL8();
+            old8 = hold8;
+            hold8 >>= here8.bits;
+            bits -= here8.bits;
+            if (here8.op == 0) {        /* up to three literals */
+                TRACE_LITERAL(&here8);
+                *out++ = (unsigned char)(here8.val);
+                here8 = lcode[hold8 & lmask];
+                old8 = hold8;
+                hold8 >>= here8.bits;
+                bits -= here8.bits;
+                if (here8.op == 0) {
+                    TRACE_LITERAL(&here8);
+                    *out++ = (unsigned char)(here8.val);
+                    here8 = lcode[hold8 & lmask];
+                  dolen8:
+                    old8 = hold8;
+                    hold8 >>= here8.bits;
+                    bits -= here8.bits;
+                    if (here8.op == 0) {
+                        TRACE_LITERAL(&here8);
+                        *out++ = (unsigned char)(here8.val);
                         continue;
                     }
                 }
-                hold8 |= load64(in) << bits;    /* 56 bits for a pair */
-                in += (63 - bits) >> 3;
-                bits |= 56;
             }
-          dolen8:
-            op = (unsigned)(here->bits);
-            hold8 >>= op;
-            bits -= op;
-            op = (unsigned)(here->op);
-            if (op == 0) {                      /* literal */
-                TRACE_LITERAL(here);
-                *out++ = (unsigned char)(here->val);
-            }
-            else if (op & 16) {                 /* length base */
-                len = (unsigned)(here->val);
-                op &= 15;                       /* number of extra bits */
-                len += (unsigned)hold8 & ((1U << op) - 1);
-                hold8 >>= op;
-                bits -= op;
+            op = (unsigned)(here8.op);
+            if (op & 16) {              /* length base */
+                len = (unsigned)(here8.val) + EXTRA8(old8, here8);
                 Tracevv((stderr, "inflate:         length %u\n", len));
-                here = dcode + (hold8 & dmask);
+                here8 = dcode[hold8 & dmask];
+                if (bits < 15 + 13 + 10)
+                    REFILL8();
               dodist8:
-                op = (unsigned)(here->bits);
-                hold8 >>= op;
-                bits -= op;
-                op = (unsigned)(here->op);
-                if (op & 16) {                  /* distance base */
-                    dist = (unsigned)(here->val);
-                    op &= 15;                   /* number of extra bits */
-                    dist += (unsigned)hold8 & ((1U << op) - 1);
+                old8 = hold8;
+                hold8 >>= here8.bits;
+                bits -= here8.bits;
+                op = (unsigned)(here8.op);
+                if (op & 16) {          /* distance base */
+                    dist = (unsigned)(here8.val) + EXTRA8(old8, here8);
 #ifdef INFLATE_STRICT
                     if (dist > dmax) {
                         strm->msg = (z_const char *)
@@ -246,8 +257,6 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                         break;
                     }
 #endif
-                    hold8 >>= op;
-                    bits -= op;
                     Tracevv((stderr, "inflate:         distance %u\n", dist));
                     op = (unsigned)(out - beg); /* max distance in output */
                     if (dist > op) {            /* see if copy from window */
@@ -304,7 +313,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                         out = copy_back(out, dist, len);
                 }
                 else if ((op & 64) == 0) {      /* 2nd level distance code */
-                    here = dcode + here->val + (hold8 & ((1U << op) - 1));
+                    here8 = dcode[here8.val + (hold8 & ((1U << op) - 1))];
                     goto dodist8;
                 }
                 else {
@@ -314,7 +323,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                 }
             }
             else if ((op & 64) == 0) {          /* 2nd level length code */
-                here = lcode + here->val + (hold8 & ((1U << op) - 1));
+                here8 = lcode[here8.val + (hold8 & ((1U << op) - 1))];
                 goto dolen8;
             }
             else if (op & 32) {                 /* end-of-block */
@@ -350,10 +359,10 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
         }
         here = lcode + (hold & lmask);
       dolen:
-        op = (unsigned)(here->bits);
-        hold >>= op;
-        bits -= op;
         op = (unsigned)(here->op);
+        len = CODE_BITS(*here);
+        hold >>= len;
+        bits -= len;
         if (op == 0) {                          /* literal */
             Tracevv((stderr, here->val >= 0x20 && here->val < 0x7f ?
                     "inflate:         literal '%c'\n" :
@@ -361,8 +370,8 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
             *out++ = (unsigned char)(here->val);
         }
         else if (op & 16) {                     /* length base */
+            op = (unsigned)(here->bits) - len;  /* number of extra bits */
             len = (unsigned)(here->val);
-            op &= 15;                           /* number of extra bits */
             if (op) {
                 if (bits < op) {
                     hold += (unsigned long)(*in++) << bits;
@@ -381,13 +390,13 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
             }
             here = dcode + (hold & dmask);
           dodist:
-            op = (unsigned)(here->bits);
-            hold >>= op;
-            bits -= op;
             op = (unsigned)(here->op);
+            dist = CODE_BITS(*here);
+            hold >>= dist;
+            bits -= dist;
             if (op & 16) {                      /* distance base */
+                op = (unsigned)(here->bits) - dist; /* number of extra bits */
                 dist = (unsigned)(here->val);
-                op &= 15;                       /* number of extra bits */
                 if (bits < op) {
                     hold += (unsigned long)(*in++) << bits;
                     bits += 8;

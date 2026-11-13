@@ -431,7 +431,7 @@ int ZEXPORT inflateBack(z_streamp strm, in_func in, void FAR *in_desc,
             /* get a literal, length, or end-of-block code */
             for (;;) {
                 here = state->lencode[BITS(state->lenbits)];
-                if ((unsigned)(here.bits) <= bits) break;
+                if (CODE_BITS(here) <= bits) break;
                 PULLBYTE();
             }
             if (here.op && (here.op & 0xf0) == 0) {
@@ -439,12 +439,12 @@ int ZEXPORT inflateBack(z_streamp strm, in_func in, void FAR *in_desc,
                 for (;;) {
                     here = state->lencode[last.val +
                             (BITS(last.bits + last.op) >> last.bits)];
-                    if ((unsigned)(last.bits + here.bits) <= bits) break;
+                    if ((unsigned)(last.bits) + CODE_BITS(here) <= bits) break;
                     PULLBYTE();
                 }
                 DROPBITS(last.bits);
             }
-            DROPBITS(here.bits);
+            DROPBITS(CODE_BITS(here));
             state->length = (unsigned)here.val;
 
             /* process literal */
@@ -474,7 +474,7 @@ int ZEXPORT inflateBack(z_streamp strm, in_func in, void FAR *in_desc,
             }
 
             /* length code -- get extra bits, if any */
-            state->extra = (unsigned)(here.op) & 15;
+            state->extra = CODE_EXTRA(here);
             if (state->extra != 0) {
                 NEEDBITS(state->extra);
                 state->length += BITS(state->extra);
@@ -485,7 +485,7 @@ int ZEXPORT inflateBack(z_streamp strm, in_func in, void FAR *in_desc,
             /* get distance code */
             for (;;) {
                 here = state->distcode[BITS(state->distbits)];
-                if ((unsigned)(here.bits) <= bits) break;
+                if (CODE_BITS(here) <= bits) break;
                 PULLBYTE();
             }
             if ((here.op & 0xf0) == 0) {
@@ -493,12 +493,12 @@ int ZEXPORT inflateBack(z_streamp strm, in_func in, void FAR *in_desc,
                 for (;;) {
                     here = state->distcode[last.val +
                             (BITS(last.bits + last.op) >> last.bits)];
-                    if ((unsigned)(last.bits + here.bits) <= bits) break;
+                    if ((unsigned)(last.bits) + CODE_BITS(here) <= bits) break;
                     PULLBYTE();
                 }
                 DROPBITS(last.bits);
             }
-            DROPBITS(here.bits);
+            DROPBITS(CODE_BITS(here));
             if (here.op & 64) {
                 strm->msg = (z_const char *)"invalid distance code";
                 state->mode = BAD;
@@ -507,7 +507,7 @@ int ZEXPORT inflateBack(z_streamp strm, in_func in, void FAR *in_desc,
             state->offset = (unsigned)here.val;
 
             /* get distance extra bits, if any */
-            state->extra = (unsigned)(here.op) & 15;
+            state->extra = CODE_EXTRA(here);
             if (state->extra != 0) {
                 NEEDBITS(state->extra);
                 state->offset += BITS(state->extra);

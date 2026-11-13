@@ -923,7 +923,7 @@ int ZEXPORT inflate(z_streamp strm, int flush) {
             state->back = 0;
             for (;;) {
                 here = state->lencode[BITS(state->lenbits)];
-                if ((unsigned)(here.bits) <= bits) break;
+                if (CODE_BITS(here) <= bits) break;
                 PULLBYTE();
             }
             if (here.op && (here.op & 0xf0) == 0) {
@@ -931,14 +931,14 @@ int ZEXPORT inflate(z_streamp strm, int flush) {
                 for (;;) {
                     here = state->lencode[last.val +
                             (BITS(last.bits + last.op) >> last.bits)];
-                    if ((unsigned)(last.bits + here.bits) <= bits) break;
+                    if ((unsigned)(last.bits) + CODE_BITS(here) <= bits) break;
                     PULLBYTE();
                 }
                 DROPBITS(last.bits);
                 state->back += last.bits;
             }
-            DROPBITS(here.bits);
-            state->back += here.bits;
+            DROPBITS(CODE_BITS(here));
+            state->back += CODE_BITS(here);
             state->length = (unsigned)here.val;
             if ((int)(here.op) == 0) {
                 Tracevv((stderr, here.val >= 0x20 && here.val < 0x7f ?
@@ -958,7 +958,7 @@ int ZEXPORT inflate(z_streamp strm, int flush) {
                 state->mode = BAD;
                 break;
             }
-            state->extra = (unsigned)(here.op) & 15;
+            state->extra = CODE_EXTRA(here);
             state->mode = LENEXT;
                 /* fallthrough */
         case LENEXT:
@@ -975,7 +975,7 @@ int ZEXPORT inflate(z_streamp strm, int flush) {
         case DIST:
             for (;;) {
                 here = state->distcode[BITS(state->distbits)];
-                if ((unsigned)(here.bits) <= bits) break;
+                if (CODE_BITS(here) <= bits) break;
                 PULLBYTE();
             }
             if ((here.op & 0xf0) == 0) {
@@ -983,21 +983,21 @@ int ZEXPORT inflate(z_streamp strm, int flush) {
                 for (;;) {
                     here = state->distcode[last.val +
                             (BITS(last.bits + last.op) >> last.bits)];
-                    if ((unsigned)(last.bits + here.bits) <= bits) break;
+                    if ((unsigned)(last.bits) + CODE_BITS(here) <= bits) break;
                     PULLBYTE();
                 }
                 DROPBITS(last.bits);
                 state->back += last.bits;
             }
-            DROPBITS(here.bits);
-            state->back += here.bits;
+            DROPBITS(CODE_BITS(here));
+            state->back += CODE_BITS(here);
             if (here.op & 64) {
                 strm->msg = (z_const char *)"invalid distance code";
                 state->mode = BAD;
                 break;
             }
             state->offset = (unsigned)here.val;
-            state->extra = (unsigned)(here.op) & 15;
+            state->extra = CODE_EXTRA(here);
             state->mode = DISTEXT;
                 /* fallthrough */
         case DISTEXT:
