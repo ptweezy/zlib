@@ -79,14 +79,9 @@ local unsigned entry8(code const FAR *p) {
 /* copy_back() may write up to this many bytes after the end of a match. */
 #define FAST8_SLOP 31
 
-/* A match of up to this many bytes can always be copied in the fast loop. A
-   longer one is copied there only if the output has room for it and for
-   FAST8_SLOP more bytes. */
-#define FAST8_SHORT 32
-
-/* Output room the fast loop needs between two checks: two literals, a short
-   match, and what the copy of the match may write after it. */
-#define FAST8_OUT (2 + FAST8_SHORT + FAST8_SLOP)
+/* Output room the fast loop needs between two checks: the three literals it
+   may write. The room for a match is checked when its length is known. */
+#define FAST8_OUT 3
 
 /* A table entry word with this bit set came from a second-level table, so
    that the bits of its first-level entry were dropped as well. */
@@ -254,9 +249,10 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     /* Fast loop. It runs while 24 bytes can be read at in (three refills of
        eight bytes, each advancing in by up to seven) and the output
        has room for FAST8_OUT bytes: between two checks the loop writes at
-       most two literals and then a match, and the copy of the match may
-       write FAST8_SLOP bytes past it. That covers a match of FAST8_SHORT
-       bytes; the room for a longer one is checked when it comes.
+       most three literals, or two literals and then a match. The room for
+       a match is checked when its length is known: copy_back() may write
+       FAST8_SLOP bytes past the match, so a match that ends closer than
+       that to the end of the output is copied byte by byte.
 
        Table entries are words here: bits in the low byte, op above it, val
        in the high half. Each table lookup uses only bits that are already in
@@ -330,18 +326,29 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
 #endif
                     Tracevv((stderr, "inflate:         distance %u\n", dist));
 
-                    if (len > (unsigned)(end - out) - FAST8_SLOP) {
-                        /* a long match near the end of the output: leave it
-                           to inflate(), with the bits of its codes for
-                           inflateMark() */
-                        state->mode = MATCH;
-                        state->length = len;
-                        state->was = len;
-                        state->offset = dist;
-                        state->back = (int)((e & 0xff) + (d & 0xff) +
-                            (e & FAST8_SUB ? state->lenbits : 0) +
-                            (d & FAST8_SUB ? state->distbits : 0));
-                        break;
+                    if ((unsigned)(end - out) < len + FAST8_SLOP) {
+                        /* near the end of the output */
+                        if (len > (unsigned)(end - out) ||
+                            dist > (unsigned)(out - beg)) {
+                            /* no room for the match, or it starts in the
+                               window: leave it to inflate(), with the bits
+                               of its codes for inflateMark() */
+                            state->mode = MATCH;
+                            state->length = len;
+                            state->was = len;
+                            state->offset = dist;
+                            state->back = (int)((e & 0xff) + (d & 0xff) +
+                                (e & FAST8_SUB ? state->lenbits : 0) +
+                                (d & FAST8_SUB ? state->distbits : 0));
+                            break;
+                        }
+                        e = entry8(lcode + (hold8 & lmask));
+                        REFILL8();
+                        from = out - dist;
+                        do {
+                            *out++ = *from++;
+                        } while (--len);
+                        goto copied8;
                     }
 
                     /* look up the next code and refill now, before the match
@@ -415,9 +422,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                     }
                     else
                         out = copy_back(out, dist, len);
-#ifdef INFLATE_ALLOW_INVALID_DISTANCE_TOOFAR_ARRR
                   copied8:
-#endif
                     if (in > last8 || out > end8)
                         break;
                     continue;
