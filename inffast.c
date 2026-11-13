@@ -350,12 +350,13 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                     Tracevv((stderr, "inflate:         distance %u\n", dist));
 
                     if ((unsigned)(end - out) < len + FAST8_SLOP) {
-                        /* near the end of the output */
-                        if (len > (unsigned)(end - out) ||
-                            dist > (unsigned)(out - beg)) {
-                            /* no room for the match, or it starts in the
-                               window: leave it to inflate(), with the bits
-                               of its codes for inflateMark() */
+                        /* near the end of the output: copy byte by byte */
+                        op = (unsigned)(out - beg);
+                        op = dist > op ? dist - op : 0; /* bytes in window */
+                        if (len > (unsigned)(end - out) || op > whave) {
+                            /* no room for the match, or its distance is
+                               too far back: leave it to inflate(), with the
+                               bits of its codes for inflateMark() */
                             state->mode = MATCH;
                             state->length = len;
                             state->was = len;
@@ -367,10 +368,24 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                         }
                         e = entry8(lcode + (hold8 & lmask));
                         REFILL8();
-                        from = out - dist;
-                        do {
-                            *out++ = *from++;
-                        } while (--len);
+                        if (op) {               /* some from the window */
+                            from = window + (op > wnext ? wsize + wnext - op :
+                                                          wnext - op);
+                            if (op > len)
+                                op = len;
+                            len -= op;
+                            do {
+                                *out++ = *from++;
+                                if (from == window + wsize)
+                                    from = window;
+                            } while (--op);
+                        }
+                        if (len) {              /* the rest from the output */
+                            from = out - dist;
+                            do {
+                                *out++ = *from++;
+                            } while (--len);
+                        }
                         goto copied8;
                     }
 
