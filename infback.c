@@ -425,6 +425,12 @@ int ZEXPORT inflateBack(z_streamp strm, in_func in, void FAR *in_desc,
                 RESTORE();
                 inflate_fast(strm, state->wsize);
                 LOAD();
+                if (state->mode == MATCH) {
+                    /* a match that did not fit before the end of the
+                       window: copy it here */
+                    state->mode = LEN;
+                    goto match;
+                }
                 break;
             }
 
@@ -513,6 +519,7 @@ int ZEXPORT inflateBack(z_streamp strm, in_func in, void FAR *in_desc,
                 state->offset += BITS(state->extra);
                 DROPBITS(state->extra);
             }
+          match:
             if (state->offset > state->wsize - (state->whave < state->wsize ?
                                                 left : 0)) {
                 strm->msg = (z_const char *)"invalid distance too far back";
