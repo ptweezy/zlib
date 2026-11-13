@@ -159,9 +159,15 @@ int ZLIB_INTERNAL inflate_table(codetype type, unsigned short FAR *lens,
        Create and fill in decoding tables.  In this loop, the table being
        filled is at next and has curr index bits.  The code being used is huff
        with length len.  That code is converted to an index by dropping drop
-       bits off of the bottom.  For codes where len is less than drop + curr,
-       those top drop + curr - len bits are incremented through all values to
-       fill the table with replicated entries.
+       bits off of the bottom.  For codes in a sub-table where len is less
+       than drop + curr, those top drop + curr - len bits are incremented
+       through all values to fill the table with replicated entries.
+
+       The root table is filled in another way.  The codes come in order of
+       their lengths, so while the codes of length len are entered, only the
+       first 1 << len entries of the root table are in use, one for each
+       code.  When the length goes up, that part of the table is doubled by
+       copying it, which replicates all of the shorter codes at once.
 
        root is the number of index bits for the root table.  When len exceeds
        root, sub-tables are created pointed to by the root entry with an index
@@ -245,10 +251,13 @@ int ZLIB_INTERNAL inflate_table(codetype type, unsigned short FAR *lens,
         incr = 1U << (len - drop);
         fill = 1U << curr;
         min = fill;                 /* save offset to next table */
-        do {
-            fill -= incr;
-            next[(huff >> drop) + fill] = here;
-        } while (fill != 0);
+        if (drop == 0)
+            next[huff] = here;      /* replicated when the table is doubled */
+        else
+            do {
+                fill -= incr;
+                next[(huff >> drop) + fill] = here;
+            } while (fill != 0);
 
         /* backwards increment the len-bit code huff: invert its bits from
            the top one down to the highest zero bit. incr gets the bits
@@ -266,7 +275,14 @@ int ZLIB_INTERNAL inflate_table(codetype type, unsigned short FAR *lens,
         sym++;
         if (--(count[len]) == 0) {
             if (len == max) break;
+            fill = len;
             len = lens[work[sym]];
+
+            /* double the root table up to the new length, or to its full
+               size if the new length does not fit in it */
+            for (; fill < root && fill < len; fill++)
+                zmemcpy((Bytef *)(*table + (1U << fill)), (Bytef *)*table,
+                        (1U << fill) * sizeof(code));
         }
 
         /* create new sub-table if needed */
