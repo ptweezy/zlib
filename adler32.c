@@ -57,6 +57,61 @@
 #  define MOD63(a) a %= BASE
 #endif
 
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(Z_NO_NEON)
+#  include <arm_neon.h>
+#  define ADLER32_NEON
+
+/* The most bytes done between reductions: NMAX rounded down to a multiple of
+   32. The 16-bit sums per byte position reach at most 173 * 255. */
+#define NMAX32 (NMAX & ~31U)
+
+/* Add the len bytes at buf to the sums *adler and *sum2, which are less than
+   BASE, and reduce them. len is a multiple of 32, with 0 < len <= NMAX32. */
+local void adler32_neon(unsigned long *adler, unsigned long *sum2,
+                        const Bytef *buf, unsigned len) {
+    static const unsigned short weight[32] = {
+        32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
+        16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+    uint32x4_t s1 = vdupq_n_u32(0);     /* sum of the bytes */
+    uint32x4_t s2 = vdupq_n_u32(0);     /* sum of s1 before each block */
+    uint16x8_t c0 = vdupq_n_u16(0);     /* sums per byte position */
+    uint16x8_t c1 = c0, c2 = c0, c3 = c0;
+    unsigned n = len;
+
+    do {
+        uint8x16_t d0 = vld1q_u8(buf);
+        uint8x16_t d1 = vld1q_u8(buf + 16);
+        uint16x8_t t;
+
+        s2 = vaddq_u32(s2, s1);
+        t = vpaddlq_u8(d0);
+        t = vpadalq_u8(t, d1);
+        s1 = vpadalq_u16(s1, t);
+        c0 = vaddw_u8(c0, vget_low_u8(d0));
+        c1 = vaddw_high_u8(c1, d0);
+        c2 = vaddw_u8(c2, vget_low_u8(d1));
+        c3 = vaddw_high_u8(c3, d1);
+        buf += 32;
+    } while (n -= 32);
+
+    /* each earlier sum counts for the 32 bytes of its block */
+    s2 = vshlq_n_u32(s2, 5);
+    s2 = vmlal_u16(s2, vget_low_u16(c0), vld1_u16(weight));
+    s2 = vmlal_high_u16(s2, c0, vld1q_u16(weight));
+    s2 = vmlal_u16(s2, vget_low_u16(c1), vld1_u16(weight + 8));
+    s2 = vmlal_high_u16(s2, c1, vld1q_u16(weight + 8));
+    s2 = vmlal_u16(s2, vget_low_u16(c2), vld1_u16(weight + 16));
+    s2 = vmlal_high_u16(s2, c2, vld1q_u16(weight + 16));
+    s2 = vmlal_u16(s2, vget_low_u16(c3), vld1_u16(weight + 24));
+    s2 = vmlal_high_u16(s2, c3, vld1q_u16(weight + 24));
+
+    *sum2 += (unsigned long)len * *adler + vaddvq_u32(s2);
+    *adler += vaddvq_u32(s1);
+    MOD(*adler);
+    MOD(*sum2);
+}
+#endif
+
 /* ========================================================================= */
 uLong ZEXPORT adler32_z(uLong adler, const Bytef *buf, z_size_t len) {
     unsigned long sum2;
@@ -92,6 +147,16 @@ uLong ZEXPORT adler32_z(uLong adler, const Bytef *buf, z_size_t len) {
         MOD28(sum2);            /* only added so many BASE's */
         return adler | (sum2 << 16);
     }
+
+#ifdef ADLER32_NEON
+    /* do blocks of 32 bytes, up to NMAX32 bytes at a time */
+    while (len >= 32) {
+        n = len > NMAX32 ? NMAX32 : (unsigned)len & ~31U;
+        adler32_neon(&adler, &sum2, buf, n);
+        buf += n;
+        len -= n;
+    }
+#endif
 
     /* do length NMAX blocks -- requires just one modulo operation */
     while (len >= NMAX) {
