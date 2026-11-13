@@ -160,13 +160,14 @@ local unsigned char FAR *copy_back(unsigned char FAR *out, unsigned dist,
 
         state->mode == LEN
         strm->avail_in >= 6
-        strm->avail_out >= 1
         start >= strm->avail_out
         state->bits < 8
 
    On return, state->mode is one of:
 
-        LEN -- ran out of output space or enough available input
+        LEN -- ran out of enough available input
+        LIT -- decoded a literal that there is no room for: state->length
+               is the literal, and state->back is set for it
         MATCH -- decoded a length/distance pair that there is no room to
                  copy here: state->length, state->offset, state->was and
                  state->back are set for it, and nothing of it was copied
@@ -181,10 +182,11 @@ local unsigned char FAR *copy_back(unsigned char FAR *out, unsigned dist,
       Therefore if strm->avail_in >= 6, then there is enough input to avoid
       checking for available input while decoding.
 
-    - A literal always has room, since the loops end when the output is
-      full.  The room for a match is checked once its length is known.  A
-      match that does not fit is left to the caller in the MATCH state,
-      which copies what fits, and the rest on later calls.
+    - The room for a literal or a match is checked when it has been
+      decoded.  One that does not fit is left to the caller in the LIT or
+      MATCH state: for a match the caller copies what fits, and the rest on
+      later calls.  So when the output is full, the next code has been
+      decoded as well, as inflate() does when it decodes the codes itself.
  */
 void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     struct inflate_state FAR *state;
@@ -223,6 +225,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     unsigned nl2, nd2;          /* the entries that may follow literal nl */
     z_const unsigned char FAR *last8;   /* three refills fit after in */
     unsigned char FAR *end8;    /* room for FAST8_OUT bytes after out */
+    unsigned char FAR *near8;   /* check the room for a match from here on */
     unsigned char FAR *stop8;   /* end of a match copied sixteen at a time */
     unsigned wd;                /* distance back in the window */
     unsigned seg;               /* bytes from there to the end of the piece */
@@ -273,6 +276,8 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     if (strm->avail_in >= 24 && strm->avail_out >= FAST8_OUT) {
         last8 = in + (strm->avail_in - 24);
         end8 = out + (strm->avail_out - FAST8_OUT);
+        near8 = strm->avail_out > 258 + FAST8_SLOP ?
+                end - (258 + FAST8_SLOP) : out;
         base[0] = beg;
         base[1] = window;
         hold8 = hold;
@@ -349,7 +354,8 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
 #endif
                     Tracevv((stderr, "inflate:         distance %u\n", dist));
 
-                    if ((unsigned)(end - out) < len + FAST8_SLOP) {
+                    if (out >= near8 &&
+                        (unsigned)(end - out) < len + FAST8_SLOP) {
                         /* near the end of the output: copy byte by byte */
                         op = (unsigned)(out - beg);
                         op = dist > op ? dist - op : 0; /* bytes in window */
@@ -543,7 +549,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
         in -= len;
         bits -= len << 3;
         hold = (unsigned long)(hold8 & ((1U << bits) - 1));
-        if (state->mode != LEN || in >= last || out >= end)
+        if (state->mode != LEN || in >= last)
             goto leave;
     }
 #endif
@@ -568,6 +574,15 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
             Tracevv((stderr, here->val >= 0x20 && here->val < 0x7f ?
                     "inflate:         literal '%c'\n" :
                     "inflate:         literal 0x%02x\n", here->val));
+            if (out == end) {
+                /* no room for the literal: leave it to inflate(), with
+                   the bits of its code for inflateMark() */
+                state->mode = LIT;
+                state->length = (unsigned)(here->val);
+                state->back = (int)(mark - (((unsigned)(last - in) << 3) +
+                                            bits));
+                break;
+            }
             *out++ = (unsigned char)(here->val);
         }
         else if (op & 16) {                     /* length base */
@@ -749,7 +764,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
             state->mode = BAD;
             break;
         }
-    } while (in < last && out < end);
+    } while (in < last);
 
 #ifdef Z_U8
   leave:

@@ -431,6 +431,13 @@ int ZEXPORT inflateBack(z_streamp strm, in_func in, void FAR *in_desc,
                     state->mode = LEN;
                     goto match;
                 }
+                if (state->mode == LIT) {
+                    /* a literal that came when the window was full */
+                    ROOM();
+                    *put++ = (unsigned char)(state->length);
+                    left--;
+                    state->mode = LEN;
+                }
                 break;
             }
 

@@ -912,7 +912,7 @@ int ZEXPORT inflate(z_streamp strm, int flush) {
             state->mode = LEN;
                 /* fallthrough */
         case LEN:
-            if (have >= 6 && left) {
+            if (have >= 6) {
                 RESTORE();
                 inflate_fast(strm, out);
                 LOAD();
