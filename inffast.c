@@ -211,6 +211,8 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     unsigned e;                 /* literal/length table entry, as a word */
     unsigned d;                 /* distance table entry, as a word */
     unsigned nl, nd;            /* the entries that may come next */
+    unsigned ne;                /* the entry after the distance code nd */
+    unsigned nl2, nd2;          /* the entries that may follow literal nl */
     z_const unsigned char FAR *last8;   /* three refills fit after in */
     unsigned char FAR *end8;    /* room for FAST8_OUT bytes after out */
     unsigned char FAR *stop8;   /* end of a match copied from the window */
@@ -263,18 +265,26 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
             bits -= e & 0xff;
             nl = entry8(lcode + (hold8 & lmask));
             nd = entry8(dcode + (hold8 & dmask));
+            ne = entry8(lcode + ((hold8 >> (nd & 63)) & lmask));
+            nl2 = entry8(lcode + ((hold8 >> (nl & 63)) & lmask));
+            nd2 = entry8(dcode + ((hold8 >> (nl & 63)) & dmask));
             KEEP8(nl);
             KEEP8(nd);
+            KEEP8(ne);
+            KEEP8(nl2);
+            KEEP8(nd2);
             if ((e & 0xff00) == 0) {    /* up to three literals */
                 *out++ = (unsigned char)(e >> 16);
                 e = nl;
                 old8 = hold8;
                 hold8 >>= e & 63;
                 bits -= e & 0xff;
-                nl = entry8(lcode + (hold8 & lmask));
-                nd = entry8(dcode + (hold8 & dmask));
+                nl = nl2;
+                nd = nd2;
+                ne = entry8(lcode + ((hold8 >> (nd & 63)) & lmask));
                 KEEP8(nl);
                 KEEP8(nd);
+                KEEP8(ne);
                 if ((e & 0xff00) == 0) {
                     *out++ = (unsigned char)(e >> 16);
                     e = nl;
@@ -283,7 +293,9 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                     hold8 >>= e & 63;
                     bits -= e & 0xff;
                     nd = entry8(dcode + (hold8 & dmask));
+                    ne = entry8(lcode + ((hold8 >> (nd & 63)) & lmask));
                     KEEP8(nd);
+                    KEEP8(ne);
                     if ((e & 0xff00) == 0) {
                         *out++ = (unsigned char)(e >> 16);
                         if (in > last8 || out > end8)
@@ -298,8 +310,10 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                 len = (e >> 16) + EXTRAW(old8, e);
                 Tracevv((stderr, "inflate:         length %u\n", len));
                 d = nd;
-                if (bits < 15 + 13 + 10)
+                if (bits < 15 + 13 + 10) {
                     REFILL8();
+                    ne = entry8(lcode + ((hold8 >> (d & 63)) & lmask));
+                }
               dodist8:
                 old8 = hold8;
                 hold8 >>= d & 63;
@@ -316,9 +330,9 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
 #endif
                     Tracevv((stderr, "inflate:         distance %u\n", dist));
 
-                    /* look up the next code and refill now, before the match
-                       is copied; neither is used if the loop ends here */
-                    e = entry8(lcode + (hold8 & lmask));
+                    /* the next code was looked up already; refill now,
+                       before the match is copied */
+                    e = ne;
                     REFILL8();
 
                     op = (unsigned)(out - beg); /* max distance in output */
@@ -397,6 +411,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                 else if ((d & 0x4000) == 0) {   /* 2nd level distance code */
                     d = entry8(dcode + (d >> 16) +
                                (hold8 & ((1U << ((d >> 8) & 15)) - 1)));
+                    ne = entry8(lcode + ((hold8 >> (d & 63)) & lmask));
                     goto dodist8;
                 }
                 else {
