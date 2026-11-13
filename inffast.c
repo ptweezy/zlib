@@ -351,6 +351,13 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                         strm->msg = (z_const char *)
                             "invalid distance too far back";
                         state->mode = BAD;
+                        if ((unsigned)(end - out) >= 258) {
+                            /* with this much room the extra bits of the
+                               distance were not dropped before */
+                            op = (d >> 8) & 15;
+                            hold8 = old8 >> op;
+                            bits += (d & 0xff) - op;
+                        }
                         break;
                     }
 #endif
@@ -626,6 +633,12 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                     strm->msg = (z_const char *)
                         "invalid distance too far back";
                     state->mode = BAD;
+                    if ((unsigned)(end - out) < 258) {
+                        /* with this little room inflate() found this,
+                           after it dropped the extra bits */
+                        hold >>= op;
+                        bits -= op;
+                    }
                     break;
                 }
 #endif
