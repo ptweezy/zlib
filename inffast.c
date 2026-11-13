@@ -211,10 +211,9 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     unsigned e;                 /* literal/length table entry, as a word */
     unsigned d;                 /* distance table entry, as a word */
     unsigned nl, nd;            /* the entries that may come next */
-    z_const unsigned char FAR *last8;   /* two refills fit after in */
+    z_const unsigned char FAR *last8;   /* three refills fit after in */
     unsigned char FAR *end8;    /* room for FAST8_OUT bytes after out */
     unsigned char FAR *stop8;   /* end of a match copied from the window */
-    int more;                   /* true if the fast loop goes on after a match */
 #endif
 
     /* copy state to local variables */
@@ -239,8 +238,8 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     dmask = (1U << state->distbits) - 1;
 
 #ifdef Z_U8
-    /* Fast loop. It runs while sixteen bytes can be read at in (two refills
-       of eight bytes, the first advancing in by up to seven) and the output
+    /* Fast loop. It runs while 24 bytes can be read at in (three refills of
+       eight bytes, each advancing in by up to seven) and the output
        has room for FAST8_OUT bytes: between two checks the loop writes at
        most two literals and then a match, and the copy of the match may
        write FAST8_SLOP bytes past it.
@@ -252,8 +251,8 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
        before a match is copied. Each code starts with at least 56 bits in
        hold8. Two literals, a length code and its extra bits take at most 40
        of them, which leaves enough for the first-level distance lookup. */
-    if (strm->avail_in >= 16 && strm->avail_out >= FAST8_OUT) {
-        last8 = in + (strm->avail_in - 16);
+    if (strm->avail_in >= 24 && strm->avail_out >= FAST8_OUT) {
+        last8 = in + (strm->avail_in - 24);
         end8 = out + (strm->avail_out - FAST8_OUT);
         hold8 = hold;
         REFILL8();
@@ -317,13 +316,10 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
 #endif
                     Tracevv((stderr, "inflate:         distance %u\n", dist));
 
-                    /* if the loop goes on after this match, look up the next
-                       code and refill now, before the match is copied */
-                    more = in <= last8 && out + len <= end8;
-                    if (more) {
-                        e = entry8(lcode + (hold8 & lmask));
-                        REFILL8();
-                    }
+                    /* look up the next code and refill now, before the match
+                       is copied; neither is used if the loop ends here */
+                    e = entry8(lcode + (hold8 & lmask));
+                    REFILL8();
 
                     op = (unsigned)(out - beg); /* max distance in output */
                     if (dist > op) {            /* see if copy from window */
@@ -394,9 +390,9 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
 #ifdef INFLATE_ALLOW_INVALID_DISTANCE_TOOFAR_ARRR
                   copied8:
 #endif
-                    if (more)
-                        continue;
-                    break;
+                    if (in > last8 || out > end8)
+                        break;
+                    continue;
                 }
                 else if ((d & 0x4000) == 0) {   /* 2nd level distance code */
                     d = entry8(dcode + (d >> 16) +
