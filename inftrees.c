@@ -250,16 +250,17 @@ int ZLIB_INTERNAL inflate_table(codetype type, unsigned short FAR *lens,
             next[(huff >> drop) + fill] = here;
         } while (fill != 0);
 
-        /* backwards increment the len-bit code huff */
-        incr = 1U << (len - 1);
-        while (huff & incr)
-            incr >>= 1;
-        if (incr != 0) {
-            huff &= incr - 1;
-            huff += incr;
-        }
-        else
-            huff = 0;
+        /* backwards increment the len-bit code huff: invert its bits from
+           the top one down to the highest zero bit. incr gets the bits
+           below that zero bit set, by spreading the zero bits of huff
+           downwards. If huff is all ones, incr is zero and huff becomes
+           zero. */
+        incr = ~huff & ((1U << len) - 1);
+        incr |= incr >> 1;
+        incr |= incr >> 2;
+        incr |= incr >> 4;
+        incr |= incr >> 8;
+        huff ^= ((1U << len) - 1) ^ (incr >> 1);
 
         /* go to next symbol, update count, len */
         sym++;
