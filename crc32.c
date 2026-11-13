@@ -505,12 +505,15 @@ const z_crc_t FAR * ZEXPORT get_crc_table(void) {
 #  include <arm_neon.h>
 #  define ARMPMULL
 
-/* Fewest bytes for which the folding is used. */
-#define Z_FOLD_MIN 192
+/* Number of 128-bit lanes that are folded side by side. */
+#define Z_FOLD_LANES 8
 
-/* Fold a into the 128 bits that are 64 * n bytes further on: the low half of
+/* Fewest bytes for which the folding is used. */
+#define Z_FOLD_MIN 256
+
+/* Fold a into the 128 bits that are 16 * n bytes further on: the low half of
    a times the low half of k, plus the high half of a times the high half of
-   k, where k has x^(64n+32) and x^(64n-32) modulo the CRC polynomial,
+   k, where k has x^(128n+32) and x^(128n-32) modulo the CRC polynomial,
    reflected. */
 local uint64x2_t fold(uint64x2_t a, uint64x2_t k) {
     poly64x2_t ap = vreinterpretq_p64_u64(a);
@@ -523,45 +526,45 @@ local uint64x2_t fold(uint64x2_t a, uint64x2_t k) {
 }
 
 /* Return the pre-conditioned CRC crc updated with the len bytes at buf, where
-   len is a multiple of 16 and at least 64. */
+   len is a multiple of 16 and at least 16 * Z_FOLD_LANES. */
 local uLong crc32_fold(uLong crc, const unsigned char FAR *buf,
                        z_size_t len) {
-    /* x^(4*128+32), x^(4*128-32), x^(128+32), x^(128-32) mod p(x) */
-    static const uint64_t k1k2[2] = {0x0154442bd4, 0x01c6e41596};
-    static const uint64_t k3k4[2] = {0x01751997d0, 0x00ccaa009e};
-    uint64x2_t k = vld1q_u64(k1k2);
-    uint64x2_t x1 = vreinterpretq_u64_u8(vld1q_u8(buf));
-    uint64x2_t x2 = vreinterpretq_u64_u8(vld1q_u8(buf + 16));
-    uint64x2_t x3 = vreinterpretq_u64_u8(vld1q_u8(buf + 32));
-    uint64x2_t x4 = vreinterpretq_u64_u8(vld1q_u8(buf + 48));
+    /* x^(8*128+32), x^(8*128-32), x^(128+32), x^(128-32) mod p(x) */
+    static const uint64_t k8[2] = {0x01e88ef372, 0x014a7fe880};
+    static const uint64_t k1[2] = {0x01751997d0, 0x00ccaa009e};
+    uint64x2_t k = vld1q_u64(k8);
+    uint64x2_t x[Z_FOLD_LANES];
     z_word_t val;
+    int i;
 
-    x1 = veorq_u64(x1, vsetq_lane_u64((uint64_t)crc, vdupq_n_u64(0), 0));
-    buf += 64;
-    len -= 64;
-    while (len >= 64) {
-        x1 = veorq_u64(fold(x1, k), vreinterpretq_u64_u8(vld1q_u8(buf)));
-        x2 = veorq_u64(fold(x2, k), vreinterpretq_u64_u8(vld1q_u8(buf + 16)));
-        x3 = veorq_u64(fold(x3, k), vreinterpretq_u64_u8(vld1q_u8(buf + 32)));
-        x4 = veorq_u64(fold(x4, k), vreinterpretq_u64_u8(vld1q_u8(buf + 48)));
-        buf += 64;
-        len -= 64;
+    for (i = 0; i < Z_FOLD_LANES; i++)
+        x[i] = vreinterpretq_u64_u8(vld1q_u8(buf + 16 * i));
+    x[0] = veorq_u64(x[0], vsetq_lane_u64((uint64_t)crc, vdupq_n_u64(0), 0));
+    buf += 16 * Z_FOLD_LANES;
+    len -= 16 * Z_FOLD_LANES;
+    while (len >= 16 * Z_FOLD_LANES) {
+        for (i = 0; i < Z_FOLD_LANES; i++)
+            x[i] = veorq_u64(fold(x[i], k),
+                             vreinterpretq_u64_u8(vld1q_u8(buf + 16 * i)));
+        buf += 16 * Z_FOLD_LANES;
+        len -= 16 * Z_FOLD_LANES;
     }
-    k = vld1q_u64(k3k4);
-    x1 = veorq_u64(fold(x1, k), x2);
-    x1 = veorq_u64(fold(x1, k), x3);
-    x1 = veorq_u64(fold(x1, k), x4);
+
+    /* the lanes into one, then what is left of the buffer */
+    k = vld1q_u64(k1);
+    for (i = 1; i < Z_FOLD_LANES; i++)
+        x[0] = veorq_u64(fold(x[0], k), x[i]);
     while (len) {
-        x1 = veorq_u64(fold(x1, k), vreinterpretq_u64_u8(vld1q_u8(buf)));
+        x[0] = veorq_u64(fold(x[0], k), vreinterpretq_u64_u8(vld1q_u8(buf)));
         buf += 16;
         len -= 16;
     }
 
     /* the CRC of the sixteen bytes left, starting from zero */
     crc = 0;
-    val = vgetq_lane_u64(x1, 0);
+    val = vgetq_lane_u64(x[0], 0);
     __asm__ volatile("crc32x %w0, %w0, %x1" : "+r"(crc) : "r"(val));
-    val = vgetq_lane_u64(x1, 1);
+    val = vgetq_lane_u64(x[0], 1);
     __asm__ volatile("crc32x %w0, %w0, %x1" : "+r"(crc) : "r"(val));
     return crc;
 }
