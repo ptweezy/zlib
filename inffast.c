@@ -223,7 +223,14 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     unsigned nl2, nd2;          /* the entries that may follow literal nl */
     z_const unsigned char FAR *last8;   /* three refills fit after in */
     unsigned char FAR *end8;    /* room for FAST8_OUT bytes after out */
-    unsigned char FAR *stop8;   /* end of a match copied from the window */
+    unsigned char FAR *stop8;   /* end of a match copied sixteen at a time */
+    unsigned wd;                /* distance back in the window */
+    unsigned seg;               /* bytes from there to the end of the piece */
+    unsigned wmask;             /* all ones if the match starts in the window */
+    unsigned pmask;             /* all ones if in the older piece of it */
+    unsigned sw;                /* all ones for a simple copy from the window */
+    unsigned simple;            /* not zero to copy sixteen bytes at a time */
+    unsigned char FAR *base[2]; /* start of the output, and the window */
 #endif
 
     /* copy state to local variables */
@@ -266,6 +273,8 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     if (strm->avail_in >= 24 && strm->avail_out >= FAST8_OUT) {
         last8 = in + (strm->avail_in - 24);
         end8 = out + (strm->avail_out - FAST8_OUT);
+        base[0] = beg;
+        base[1] = window;
         hold8 = hold;
         REFILL8();
         e = entry8(lcode + (hold8 & lmask));
@@ -371,7 +380,50 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                     REFILL8();
 
                     op = (unsigned)(out - beg); /* max distance in output */
-                    if (dist > op) {            /* see if copy from window */
+                    if (op >= 32768U) {
+                        /* no distance is longer: all from the output */
+                        simple = dist >= 16;
+                        from = out - dist;
+                    }
+                    else {
+                        /* The match may start in the window. With a small
+                           output buffer the processor cannot predict that,
+                           so the usual match is set up without a branch on
+                           it, using masks: sixteen bytes at a time from the
+                           output, or from one piece of the window that has
+                           FAST8_SLOP bytes after the match. The window has
+                           two pieces: the newer wnext bytes at its start,
+                           and before those the bytes up to its end. */
+                        wmask = 0U - (unsigned)(dist > op);
+                        wd = dist - op;
+                        pmask = 0U - (unsigned)(wd > wnext);
+                        seg = wd - (wnext & pmask);
+                        sw = wmask & (0U - (unsigned)(wd <= whave)) &
+                             (0U - (unsigned)(seg >= len + FAST8_SLOP));
+                        simple = sw | (~wmask & (unsigned)(dist >= 16));
+                        /* the source, counted from the start of the window
+                           or of the output; the start of the output itself
+                           if the match is in the window and not simple */
+                        from = base[sw & 1] +
+                               ((sw & (wnext + (wsize & pmask) - wd)) |
+                                (~wmask & (op - dist)));
+                    }
+                    if (simple) {
+                        stop8 = out + len;
+                        zmemcpy(out, from, 16);
+                        zmemcpy(out + 16, from + 16, 16);
+                        if (len > 32) {
+                            out += 32;
+                            from += 32;
+                            do {
+                                zmemcpy(out, from, 16);
+                                out += 16;
+                                from += 16;
+                            } while (out < stop8);
+                        }
+                        out = stop8;
+                    }
+                    else if (dist > op) {       /* the rest from the window */
                         op = dist - op;         /* distance back in window */
                         if (op > whave) {
                             if (state->sane) {
@@ -434,7 +486,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                                 out = copy_back(out, dist, len);
                         }
                     }
-                    else
+                    else                        /* a short distance */
                         out = copy_back(out, dist, len);
                   copied8:
                     if (in > last8 || out > end8)
