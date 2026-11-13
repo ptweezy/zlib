@@ -497,6 +497,76 @@ const z_crc_t FAR * ZEXPORT get_crc_table(void) {
  */
 #ifdef ARMCRC32
 
+/* If the carry-less multiply instruction can be assumed as well, use it for
+   long buffers. */
+#if defined(__ARM_NEON) && \
+    (defined(__ARM_FEATURE_AES) || defined(__ARM_FEATURE_CRYPTO)) && \
+    !defined(Z_NO_PMULL)
+#  include <arm_neon.h>
+#  define ARMPMULL
+
+/* Fewest bytes for which the folding is used. */
+#define Z_FOLD_MIN 192
+
+/* Fold a into the 128 bits that are 64 * n bytes further on: the low half of
+   a times the low half of k, plus the high half of a times the high half of
+   k, where k has x^(64n+32) and x^(64n-32) modulo the CRC polynomial,
+   reflected. */
+local uint64x2_t fold(uint64x2_t a, uint64x2_t k) {
+    poly64x2_t ap = vreinterpretq_p64_u64(a);
+    poly64x2_t kp = vreinterpretq_p64_u64(k);
+    uint64x2_t lo = vreinterpretq_u64_p128(
+        vmull_p64(vgetq_lane_p64(ap, 0), vgetq_lane_p64(kp, 0)));
+    uint64x2_t hi = vreinterpretq_u64_p128(vmull_high_p64(ap, kp));
+
+    return veorq_u64(lo, hi);
+}
+
+/* Return the pre-conditioned CRC crc updated with the len bytes at buf, where
+   len is a multiple of 16 and at least 64. */
+local uLong crc32_fold(uLong crc, const unsigned char FAR *buf,
+                       z_size_t len) {
+    /* x^(4*128+32), x^(4*128-32), x^(128+32), x^(128-32) mod p(x) */
+    static const uint64_t k1k2[2] = {0x0154442bd4, 0x01c6e41596};
+    static const uint64_t k3k4[2] = {0x01751997d0, 0x00ccaa009e};
+    uint64x2_t k = vld1q_u64(k1k2);
+    uint64x2_t x1 = vreinterpretq_u64_u8(vld1q_u8(buf));
+    uint64x2_t x2 = vreinterpretq_u64_u8(vld1q_u8(buf + 16));
+    uint64x2_t x3 = vreinterpretq_u64_u8(vld1q_u8(buf + 32));
+    uint64x2_t x4 = vreinterpretq_u64_u8(vld1q_u8(buf + 48));
+    z_word_t val;
+
+    x1 = veorq_u64(x1, vsetq_lane_u64((uint64_t)crc, vdupq_n_u64(0), 0));
+    buf += 64;
+    len -= 64;
+    while (len >= 64) {
+        x1 = veorq_u64(fold(x1, k), vreinterpretq_u64_u8(vld1q_u8(buf)));
+        x2 = veorq_u64(fold(x2, k), vreinterpretq_u64_u8(vld1q_u8(buf + 16)));
+        x3 = veorq_u64(fold(x3, k), vreinterpretq_u64_u8(vld1q_u8(buf + 32)));
+        x4 = veorq_u64(fold(x4, k), vreinterpretq_u64_u8(vld1q_u8(buf + 48)));
+        buf += 64;
+        len -= 64;
+    }
+    k = vld1q_u64(k3k4);
+    x1 = veorq_u64(fold(x1, k), x2);
+    x1 = veorq_u64(fold(x1, k), x3);
+    x1 = veorq_u64(fold(x1, k), x4);
+    while (len) {
+        x1 = veorq_u64(fold(x1, k), vreinterpretq_u64_u8(vld1q_u8(buf)));
+        buf += 16;
+        len -= 16;
+    }
+
+    /* the CRC of the sixteen bytes left, starting from zero */
+    crc = 0;
+    val = vgetq_lane_u64(x1, 0);
+    __asm__ volatile("crc32x %w0, %w0, %x1" : "+r"(crc) : "r"(val));
+    val = vgetq_lane_u64(x1, 1);
+    __asm__ volatile("crc32x %w0, %w0, %x1" : "+r"(crc) : "r"(val));
+    return crc;
+}
+#endif
+
 /*
    Constants empirically determined to maximize speed. These values are from
    measurements on a Cortex-A57. Your mileage may vary.
@@ -529,6 +599,16 @@ uLong ZEXPORT crc32_z(uLong crc, const unsigned char FAR *buf, z_size_t len) {
         val = *buf++;
         __asm__ volatile("crc32b %w0, %w0, %w1" : "+r"(crc) : "r"(val));
     }
+
+#ifdef ARMPMULL
+    /* Fold all but the last few bytes with carry-less multiplies. */
+    if (len >= Z_FOLD_MIN) {
+        last = len & ~(z_size_t)15;
+        crc = crc32_fold(crc, buf, last);
+        buf += last;
+        len -= last;
+    }
+#endif
 
     /* Prepare to compute the CRC on full 64-bit words word[0..num-1]. */
     word = (z_word_t const *)buf;
