@@ -50,28 +50,48 @@ local Z_U8 load64(z_const unsigned char FAR *p) {
 #define EXTRA8(old, e) \
     ((unsigned)(((old) & (((Z_U8)1 << (e).bits) - 1)) >> ((e).op & 15)))
 
+/* copy_back() may write up to this many bytes after the end of a match. */
+#define FAST8_SLOP 31
+
+/* Output room the fast loop needs between two checks: two literals, a match,
+   and what the copy of the match may write after it. */
+#define FAST8_OUT (2 + 258 + FAST8_SLOP)
+
 /* Copy len >= 1 bytes from dist bytes back in the output to out, and return
-   out + len. It may write up to fifteen bytes after out + len, so the caller
-   must have that room. */
+   out + len. It may write up to FAST8_SLOP bytes after out + len, so the
+   caller must have that room. The first two steps are done without a test, so
+   that the usual short match needs no loop. */
 local unsigned char FAR *copy_back(unsigned char FAR *out, unsigned dist,
                                    unsigned len) {
     unsigned char FAR *from = out - dist;
     unsigned char FAR *stop = out + len;
 
     if (dist >= 16) {                   /* sixteen at a time, no overlap */
-        do {
-            zmemcpy(out, from, 16);
-            out += 16;
-            from += 16;
-        } while (out < stop);
+        zmemcpy(out, from, 16);
+        zmemcpy(out + 16, from + 16, 16);
+        if (len > 32) {
+            out += 32;
+            from += 32;
+            do {
+                zmemcpy(out, from, 16);
+                out += 16;
+                from += 16;
+            } while (out < stop);
+        }
         return stop;
     }
     if (dist >= 8) {                    /* eight at a time, no overlap */
-        do {
-            zmemcpy(out, from, 8);
-            out += 8;
-            from += 8;
-        } while (out < stop);
+        zmemcpy(out, from, 8);
+        zmemcpy(out + 8, from + 8, 8);
+        if (len > 16) {
+            out += 16;
+            from += 16;
+            do {
+                zmemcpy(out, from, 8);
+                out += 8;
+                from += 8;
+            } while (out < stop);
+        }
         return stop;
     }
     if (dist == 1) {                    /* a run of one byte, eight at a time */
@@ -164,7 +184,9 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     Z_U8 old8;                  /* hold8 before the last code was dropped */
     code here8;                 /* retrieved table entry, by value */
     z_const unsigned char FAR *last8;   /* two refills fit after in */
-    unsigned char FAR *end8;    /* room for two literals, a match and 15 more */
+    unsigned char FAR *end8;    /* room for FAST8_OUT bytes after out */
+    unsigned char FAR *stop8;   /* end of a match copied from the window */
+    int more;                   /* true if the fast loop goes on after a match */
 #endif
 
     /* copy state to local variables */
@@ -189,27 +211,28 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     dmask = (1U << state->distbits) - 1;
 
 #ifdef Z_U8
-    /* Fast loop, while sixteen bytes can be read at in (two refills of eight
-       bytes, the first advancing in by up to seven) and the output has room
-       for two literals and a match plus fifteen bytes: one iteration can
-       write two literals and then a match, and copy_back() may write fifteen
-       bytes past the match.
+    /* Fast loop. It runs while sixteen bytes can be read at in (two refills
+       of eight bytes, the first advancing in by up to seven) and the output
+       has room for FAST8_OUT bytes: between two checks the loop writes at
+       most two literals and then a match, and the copy of the match may
+       write FAST8_SLOP bytes past it.
 
-       Each table lookup uses only bits that are already in hold8, and the
+       Each table lookup uses only bits that are already in hold8, and a
        refill follows the lookup, so the refill does not delay the lookup.
-       The refill at the top leaves at least 56 bits. Two literals, a length
-       code and its extra bits take at most 40 of them, which leaves enough
-       for the first-level distance lookup. Before the distance code is
-       dropped there are at least 38: 15 for the code, 13 for its extra bits,
-       and 10 for the lookup at the top of the next iteration. */
-    if (strm->avail_in >= 16 && strm->avail_out >= 2 + 258 + 15) {
+       The first-level entry for the next code is looked up before a match is
+       copied, so that it is ready when the copy is done. Each code starts
+       with at least 56 bits in hold8. Two literals, a length code and its
+       extra bits take at most 40 of them, which leaves enough for the
+       first-level distance lookup. Before the distance code is dropped there
+       are at least 38: 15 for the code, 13 for its extra bits, and 10 for
+       the lookup of the next code. */
+    if (strm->avail_in >= 16 && strm->avail_out >= FAST8_OUT) {
         last8 = in + (strm->avail_in - 16);
-        end8 = out + (strm->avail_out - (2 + 258 + 15));
+        end8 = out + (strm->avail_out - FAST8_OUT);
         hold8 = hold;
         REFILL8();
-        do {
-            here8 = lcode[hold8 & lmask];
-            REFILL8();
+        here8 = lcode[hold8 & lmask];
+        for (;;) {
             old8 = hold8;
             hold8 >>= here8.bits;
             bits -= here8.bits;
@@ -231,6 +254,10 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                     if (here8.op == 0) {
                         TRACE_LITERAL(&here8);
                         *out++ = (unsigned char)(here8.val);
+                        if (in > last8 || out > end8)
+                            break;
+                        here8 = lcode[hold8 & lmask];
+                        REFILL8();
                         continue;
                     }
                 }
@@ -258,6 +285,15 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                     }
 #endif
                     Tracevv((stderr, "inflate:         distance %u\n", dist));
+
+                    /* if the loop goes on after this match, look up the next
+                       code and refill now, before the match is copied */
+                    more = in <= last8 && out + len <= end8;
+                    if (more) {
+                        here8 = lcode[hold8 & lmask];
+                        REFILL8();
+                    }
+
                     op = (unsigned)(out - beg); /* max distance in output */
                     if (dist > op) {            /* see if copy from window */
                         op = dist - op;         /* distance back in window */
@@ -273,7 +309,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                                 do {
                                     *out++ = 0;
                                 } while (--len);
-                                continue;
+                                goto copied8;
                             }
                             len -= op - whave;
                             do {
@@ -281,7 +317,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                             } while (--op > whave);
                             if (op == 0) {
                                 out = copy_back(out, dist, len);
-                                continue;
+                                goto copied8;
                             }
 #endif
                         }
@@ -301,16 +337,35 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                         }
                         else                    /* contiguous in window */
                             from += wnext - op;
-                        if (op > len)
-                            op = len;
-                        zmemcpy(out, from, op); /* from the window */
-                        out += op;
-                        len -= op;
-                        if (len)                /* rest from output */
-                            out = copy_back(out, dist, len);
+                        if (len + 15 <= op) {
+                            /* all from the window, which has enough bytes
+                               after the match to read sixteen at a time */
+                            stop8 = out + len;
+                            do {
+                                zmemcpy(out, from, 16);
+                                out += 16;
+                                from += 16;
+                            } while (out < stop8);
+                            out = stop8;
+                        }
+                        else {
+                            if (op > len)
+                                op = len;
+                            zmemcpy(out, from, op); /* from the window */
+                            out += op;
+                            len -= op;
+                            if (len)                /* rest from output */
+                                out = copy_back(out, dist, len);
+                        }
                     }
                     else
                         out = copy_back(out, dist, len);
+#ifdef INFLATE_ALLOW_INVALID_DISTANCE_TOOFAR_ARRR
+                  copied8:
+#endif
+                    if (more)
+                        continue;
+                    break;
                 }
                 else if ((op & 64) == 0) {      /* 2nd level distance code */
                     here8 = dcode[here8.val + (hold8 & ((1U << op) - 1))];
@@ -336,7 +391,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                 state->mode = BAD;
                 break;
             }
-        } while (in <= last8 && out <= end8);
+        }
 
         /* return the whole bytes not used, leaving fewer than eight bits */
         len = bits >> 3;
