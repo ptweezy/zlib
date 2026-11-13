@@ -83,6 +83,11 @@ local unsigned entry8(code const FAR *p) {
    may write. The room for a match is checked when its length is known. */
 #define FAST8_OUT 3
 
+/* The largest output buffer for which the fast loop finds out with masks
+   whether a match starts in the window. With a larger buffer, a branch is
+   predicted well enough and takes fewer instructions. */
+#define FAST8_SMALL 0U
+
 /* A table entry word with this bit set came from a second-level table, so
    that the bits of its first-level entry were dropped as well. */
 #define FAST8_SUB 0x8000U
@@ -233,6 +238,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
     unsigned pmask;             /* all ones if in the older piece of it */
     unsigned sw;                /* all ones for a simple copy from the window */
     unsigned simple;            /* not zero to copy sixteen bytes at a time */
+    int small8;                 /* true if the output buffer is a small one */
     unsigned char FAR *base[2]; /* start of the output, and the window */
 #endif
 
@@ -278,6 +284,7 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
         end8 = out + (strm->avail_out - FAST8_OUT);
         near8 = strm->avail_out > 258 + FAST8_SLOP ?
                 end - (258 + FAST8_SLOP) : out;
+        small8 = start <= FAST8_SMALL;
         base[0] = beg;
         base[1] = window;
         hold8 = hold;
@@ -405,6 +412,13 @@ void ZLIB_INTERNAL inflate_fast(z_streamp strm, unsigned start) {
                         /* no distance is longer: all from the output */
                         simple = dist >= 16;
                         from = out - dist;
+                    }
+                    else if (!small8) {
+                        /* a large output buffer: branch on whether the
+                           match is all in the output */
+                        simple = (unsigned)(dist >= 16) &
+                                 (unsigned)(dist <= op);
+                        from = out - (dist & (0U - simple));
                     }
                     else {
                         /* The match may start in the window. With a small
